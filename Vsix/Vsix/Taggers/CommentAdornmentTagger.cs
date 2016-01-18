@@ -10,7 +10,7 @@
 //***************************************************************************
 
 // This controls whether the adornments are positioned next to the hex values or instead of them.
-#define HIDING_TEXT
+#define HIDING_TEXT 
 
 using System;
 using System.Collections.Generic;
@@ -99,9 +99,14 @@ namespace IntraTextAdornmentSample
 
         protected override CommentAdornment CreateAdornment(CommentTag dataTag, SnapshotSpan span)
         {
-            return new CommentAdornment(dataTag,() => RemoveAdornment(span));
+            return new CommentAdornment(dataTag,() => OnSpanClick(span));
         }
 
+        private void OnSpanClick(SnapshotSpan span)
+        {
+            view.Caret.MoveTo(span.Start);
+            DisableTag(span);
+        }
 
 
         protected override bool UpdateAdornment(CommentAdornment adornment, CommentTag dataTag)

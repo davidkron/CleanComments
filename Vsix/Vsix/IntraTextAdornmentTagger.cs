@@ -35,9 +35,9 @@ namespace IntraTextAdornmentSample
     {
         protected readonly IWpfTextView view;
         private Dictionary<SnapshotSpan, TAdornment> adornmentCache = new Dictionary<SnapshotSpan, TAdornment>();
-        private readonly HashSet<SnapshotSpan> _disabledAdornmentSpans = new HashSet<SnapshotSpan>();
         protected ITextSnapshot snapshot { get; private set; }
         private readonly List<SnapshotSpan> invalidatedSpans = new List<SnapshotSpan>();
+        private SnapshotSpan? ignoredSpan = null;
 
         protected IntraTextAdornmentTagger(IWpfTextView view)
         {
@@ -46,6 +46,40 @@ namespace IntraTextAdornmentSample
             
             this.view.LayoutChanged += HandleLayoutChanged;
             this.view.TextBuffer.Changed += HandleBufferChanged;
+            this.view.Caret.PositionChanged += HandlePositionChanged;
+        }
+
+        private void HandlePositionChanged(object sender, CaretPositionChangedEventArgs e)
+        {
+            UpdateSnapShot();
+
+            var caretPos = view.Caret.Position.BufferPosition.Position;
+            if (ignoredSpan.HasValue)
+            {
+                if (!CaretInsideSpan(caretPos, ignoredSpan.Value))
+                {
+                    var prevIgnoredSpan = ignoredSpan.Value;
+                    ignoredSpan = null;
+                    RaiseTagsChanged(prevIgnoredSpan);
+                }
+            }
+
+            var toDisable = adornmentCache.Keys.Where(span => CaretInsideSpan(caretPos, span));
+            if (toDisable.Count() > 1)
+                 throw new NotImplementedException();
+            if (toDisable.Count() != 1) return;
+            DisableTag(toDisable.First());
+        }
+
+        protected void DisableTag(SnapshotSpan span)
+        {
+            ignoredSpan = span;
+            RaiseTagsChanged(ignoredSpan.Value);
+        }
+
+        private static bool CaretInsideSpan(int caretPos, SnapshotSpan span)
+        {
+            return caretPos >= span.Start && caretPos <= span.End;
         }
 
         /// <param name="span">The span of text that this adornment will elide.</param>
@@ -93,17 +127,7 @@ namespace IntraTextAdornmentSample
         {
             // Store the snapshot that we're now current with and send an event
             // for the text that has changed.
-            if (snapshot != view.TextBuffer.CurrentSnapshot)
-            {
-                snapshot = view.TextBuffer.CurrentSnapshot;
-
-                var translatedAdornmentCache = new Dictionary<SnapshotSpan, TAdornment>();
-
-                foreach (var keyValuePair in adornmentCache)
-                    translatedAdornmentCache.Add(keyValuePair.Key.TranslateTo(snapshot, SpanTrackingMode.EdgeExclusive), keyValuePair.Value);
-
-                adornmentCache = translatedAdornmentCache;
-            }
+            UpdateSnapShot();
 
             List<SnapshotSpan> translatedSpans;
             lock (invalidatedSpans)
@@ -121,18 +145,28 @@ namespace IntraTextAdornmentSample
             RaiseTagsChanged(new SnapshotSpan(start, end));
         }
 
+        private void UpdateSnapShot()
+        {
+            if (snapshot != view.TextBuffer.CurrentSnapshot)
+            {
+                snapshot = view.TextBuffer.CurrentSnapshot;
+
+                var translatedAdornmentCache = new Dictionary<SnapshotSpan, TAdornment>();
+
+                foreach (var keyValuePair in adornmentCache)
+                    translatedAdornmentCache.Add(keyValuePair.Key.TranslateTo(snapshot, SpanTrackingMode.EdgeExclusive),
+                        keyValuePair.Value);
+
+                adornmentCache = translatedAdornmentCache;
+            }
+        }
+
         /// <summary>
         /// Causes intra-text adornments to be updated synchronously.
         /// </summary>
-        protected void RaiseTagsChanged(SnapshotSpan span)
+        private void RaiseTagsChanged(SnapshotSpan span)
         {
             TagsChanged?.Invoke(this, new SnapshotSpanEventArgs(span));
-        }
-
-        protected void RemoveAdornment(SnapshotSpan span)
-        {
-            _disabledAdornmentSpans.Add(span);
-            RaiseTagsChanged(span);
         }
 
         private void HandleLayoutChanged(object sender, TextViewLayoutChangedEventArgs e)
@@ -150,38 +184,44 @@ namespace IntraTextAdornmentSample
                 adornmentCache.Remove(span);
         }
 
-
         // Produces tags on the snapshot that the tag consumer asked for.
         public virtual IEnumerable<ITagSpan<IntraTextAdornmentTag>> GetTags(NormalizedSnapshotSpanCollection spans)
         {
             if (spans == null)
                 yield break;
 
-            //Dont re-add disabled spans
-            var spanList = spans.ToList();
-            foreach (var span in spans.ToList().Where(span => _disabledAdornmentSpans.Contains(span)))
-            {
-                spanList.Remove(span);
-                _disabledAdornmentSpans.Remove(span);
-            }
 
-            spans = new NormalizedSnapshotSpanCollection(spanList);
+            var requestedSnapshot = spans[0].Snapshot;
+            spans = new NormalizedSnapshotSpanCollection(spans.Select(span => span.TranslateTo(snapshot, SpanTrackingMode.EdgeExclusive)));
+
+            //Dont add ignored spans
+            if (ignoredSpan.HasValue)
+            {
+                ignoredSpan = ignoredSpan.Value.TranslateTo(snapshot, SpanTrackingMode.EdgeExclusive);
+                var spanList = spans.ToList();
+                var intersectingWithIgnored = spans.ToList().Where(span => span.IntersectsWith(ignoredSpan.Value));
+                if(intersectingWithIgnored.Count() > 1)
+                    throw new NotImplementedException();
+
+                foreach (var span in intersectingWithIgnored)
+                    spanList.Remove(span);
+
+                spans = new NormalizedSnapshotSpanCollection(spanList);
+            }
 
             if (spans.Count == 0)
                 yield break;
 
             // Translate the request to the snapshot that this tagger is current with.
 
-            var requestedSnapshot = spans[0].Snapshot;
 
-            var translatedSpans = new NormalizedSnapshotSpanCollection(spans.Select(span => span.TranslateTo(snapshot, SpanTrackingMode.EdgeExclusive)));
 
             //Remove spans that are under the marker
-            var caretPos = view.Caret.Position.BufferPosition.Position;
-            translatedSpans = new NormalizedSnapshotSpanCollection(translatedSpans.Where(span => caretPos < span.Start || caretPos > span.End));
+            //var caretPos = view.Caret.Position.BufferPosition.Position;
+            //translatedSpans = new NormalizedSnapshotSpanCollection(translatedSpans.Where(span => caretPos < span.Start || caretPos > span.End));
 
             // Grab the adornments.
-            foreach (var tagSpan in GetAdornmentTagsOnSnapshot(translatedSpans))
+            foreach (var tagSpan in GetAdornmentTagsOnSnapshot(spans))
             {
                 // Translate each adornment to the snapshot that the tagger was asked about.
                 var span = tagSpan.Span.TranslateTo(requestedSnapshot, SpanTrackingMode.EdgeExclusive);
